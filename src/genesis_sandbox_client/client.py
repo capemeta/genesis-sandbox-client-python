@@ -14,6 +14,7 @@ from typing import Any
 
 from .errors import APIError, ProtocolError, TransportError
 from .types import SSEEvent
+from .workspace_client import WorkspaceClientMixin
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -118,7 +119,7 @@ def _validate_resolution(environment: dict[str, Any] | None, resolution_id: str 
         raise ValueError("resolution_id and environment selector are mutually exclusive")
 
 
-class Client:
+class Client(WorkspaceClientMixin):
     def __init__(
         self,
         base_url: str,
@@ -494,30 +495,6 @@ class Client:
         if language:
             payload["language"] = language
         return self._request("POST", f"/v1/sandboxes/{urllib.parse.quote(sandbox_id)}/sessions", payload)
-
-    def create_workspace(
-        self,
-        workspace_id: str | None = None,
-        metadata: dict[str, str] | None = None,
-        ttl_seconds: int | None = None,
-        quota_mb: int | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if workspace_id:
-            payload["workspace_id"] = workspace_id
-        if metadata:
-            payload["metadata"] = metadata
-        if ttl_seconds:
-            payload["ttl_seconds"] = int(ttl_seconds)
-        if quota_mb:
-            payload["quota_mb"] = int(quota_mb)
-        return self._request("POST", "/v1/workspaces", payload)
-
-    def get_workspace(self, workspace_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/v1/workspaces/{urllib.parse.quote(workspace_id)}")
-
-    def delete_workspace(self, workspace_id: str) -> dict[str, Any] | None:
-        return self._request("DELETE", f"/v1/workspaces/{urllib.parse.quote(workspace_id)}")
 
     def create_session(
         self,
@@ -940,25 +917,6 @@ class Client:
         if len(data) > 16384:
             raise ProtocolError("delete receipt exceeds byte budget")
         return json.loads(data) if data else None
-
-    def get_workspace_view(self, session_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/workspace-view")
-
-    def get_session_history(self, session_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/history")
-
-    def purge_session_workspace(self, session_id: str) -> dict[str, Any]:
-        return self._request("POST", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/workspace:purge")
-
-    def prepare_workspace_view(self, session_id: str) -> dict[str, Any]:
-        return self._request(
-            "POST", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/workspace-view?action=prepare"
-        )
-
-    def seal_workspace_view(self, session_id: str) -> dict[str, Any]:
-        return self._request(
-            "POST", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/workspace-view?action=seal"
-        )
 
     def build_dependencies(
         self,
