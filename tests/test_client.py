@@ -247,6 +247,7 @@ class ClientContractTest(unittest.TestCase):
         urlopen.side_effect = [OSError("connection reset"), _Response(200, {"exec_id": "exec-1"})]
         client = Client("http://127.0.0.1:18010", retry_base_delay=0)
         from genesis_sandbox_client import TransportError
+
         with self.assertRaises(TransportError):
             client.exec_session_async("sess-1", code="print(1)", operation_id="op-1")
         self.assertEqual(urlopen.call_count, 1)
@@ -259,7 +260,9 @@ class SessionLookupTests(unittest.TestCase):
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
     def test_lookup_session_hit(self, urlopen):
-        urlopen.return_value = _Response(200, {"session_id": "session-1", "idempotency_key": "request-1", "status": "active"})
+        urlopen.return_value = _Response(
+            200, {"session_id": "session-1", "idempotency_key": "request-1", "status": "active"}
+        )
         result = Client("http://127.0.0.1:18010").lookup_session("request-1")
         request = urlopen.call_args.args[0]
         parsed = urllib.parse.urlparse(request.full_url)

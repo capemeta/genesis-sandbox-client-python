@@ -8,12 +8,21 @@ from urllib.parse import quote, urlencode
 from .errors import ProtocolError
 
 
-def validate_exec_record(value: Any, session: str, execution: str | None = None, operation: str | None = None) -> dict[str, Any]:
+def validate_exec_record(
+    value: Any, session: str, execution: str | None = None, operation: str | None = None
+) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("session_id") != session:
         raise ProtocolError("execution receipt original session mismatch")
-    if not isinstance(value.get("exec_id"), str) or not value["exec_id"] or not isinstance(value.get("operation_id"), str) or not value["operation_id"]:
+    if (
+        not isinstance(value.get("exec_id"), str)
+        or not value["exec_id"]
+        or not isinstance(value.get("operation_id"), str)
+        or not value["operation_id"]
+    ):
         raise ProtocolError("execution receipt original identity missing")
-    if (execution is not None and value["exec_id"] != execution) or (operation is not None and value["operation_id"] != operation):
+    if (execution is not None and value["exec_id"] != execution) or (
+        operation is not None and value["operation_id"] != operation
+    ):
         raise ProtocolError("execution receipt original operation mismatch")
     if value.get("status") not in {"queued", "running", "succeeded", "failed", "cancelled", "timed_out", "interrupted"}:
         raise ProtocolError("invalid execution receipt status")
@@ -49,7 +58,12 @@ class SessionExecClientMixin:
         if not isinstance(page, dict) or not isinstance(page.get("items"), list):
             raise ProtocolError("invalid execution history page")
         total = page.get("total")
-        if isinstance(total, bool) or not isinstance(total, int) or total < len(page["items"]) or len(page["items"]) > (limit or 50):
+        if (
+            isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < len(page["items"])
+            or len(page["items"]) > (limit or 50)
+        ):
             raise ProtocolError("invalid execution history page size")
         if "next_cursor" in page and not isinstance(page["next_cursor"], str):
             raise ProtocolError("invalid opaque execution page cursor")

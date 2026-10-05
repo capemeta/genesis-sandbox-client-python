@@ -12,8 +12,8 @@ import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from .errors import APIError, ProtocolError, TransportError
 from .control_probe import RuntimeControlClientMixin
+from .errors import APIError, ProtocolError, TransportError
 from .execution_governance import trusted_governance as validate_trusted_governance
 from .invocation_output import output_request
 from .json_codec import loads as decode_response_json
@@ -93,14 +93,7 @@ def _build_environment(
     description: str | None = None,
     profile_revision: str | None = None,
 ) -> dict[str, Any] | None:
-    """Build an environment selector dict from profile or hints.
-
-    Args:
-        profile: Explicit profile name.
-        hints: List of required capabilities for automatic selection.
-        strict: If True, fail when not all capabilities are satisfied (only with hints).
-        description: Free-text description of the workload to assist auto-selection.
-    """
+    """构造精确 profile 或能力 hints；两种选择方式互斥。"""
     if profile and hints:
         raise ValueError("profile and hints are mutually exclusive")
     if profile_revision and not profile:
@@ -203,6 +196,7 @@ class Client(WorkspaceClientMixin, SessionExecClientMixin, WorkspaceLifecycleCli
                     opened = _urlopen(req, timeout=self.timeout if timeout is None else timeout)
                 else:
                     from .deadline_http import deadline_urlopen
+
                     opened = deadline_urlopen(req, deadline_seconds)
                 with opened as response:
                     if response.status == 204:
@@ -543,13 +537,22 @@ class Client(WorkspaceClientMixin, SessionExecClientMixin, WorkspaceLifecycleCli
         注意：服务端 404 无法区分“从未创建”与“去重/回执保留期已过”，无法证明
         未执行过；必须核对原身份及保留窗口，不得据此自动重新提交。
         """
-        if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key.encode("utf-8")) > 128 or any(ord(char) < 32 for char in idempotency_key):
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key.encode("utf-8")) > 128
+            or any(ord(char) < 32 for char in idempotency_key)
+        ):
             raise ValueError("idempotency_key is required")
         try:
             result = self._request(
                 "GET", f"/v1/sessions:lookup?idempotency_key={urllib.parse.quote(str(idempotency_key))}"
             )
-            if not isinstance(result, dict) or not result.get("session_id") or result.get("idempotency_key") != idempotency_key:
+            if (
+                not isinstance(result, dict)
+                or not result.get("session_id")
+                or result.get("idempotency_key") != idempotency_key
+            ):
                 raise ProtocolError("session lookup original identity mismatch")
             return result
         except APIError as exc:
@@ -677,14 +680,16 @@ class Client(WorkspaceClientMixin, SessionExecClientMixin, WorkspaceLifecycleCli
 
     def get_exec(self, session_id: str, exec_id: str) -> dict[str, Any]:
         result = self._request(
-            "GET", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs/{urllib.parse.quote(exec_id, safe='')}"
+            "GET",
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs/{urllib.parse.quote(exec_id, safe='')}",
         )
         return validate_exec_record(result, session_id, execution=exec_id)
 
     def get_exec_by_operation(self, session_id: str, operation_id: str) -> dict[str, Any]:
         result = self._request(
             "GET",
-            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs:lookup?operation_id={urllib.parse.quote(operation_id, safe='')}",
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs:lookup"
+            f"?operation_id={urllib.parse.quote(operation_id, safe='')}",
         )
         return validate_exec_record(result, session_id, operation=operation_id)
 
@@ -706,7 +711,8 @@ class Client(WorkspaceClientMixin, SessionExecClientMixin, WorkspaceLifecycleCli
         """
         result = self._request(
             "POST",
-            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs/{urllib.parse.quote(exec_id, safe='')}:cancel",
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs/"
+            f"{urllib.parse.quote(exec_id, safe='')}:cancel",
             timeout=timeout,
             max_retries=max_retries,
         )
@@ -726,29 +732,14 @@ class Client(WorkspaceClientMixin, SessionExecClientMixin, WorkspaceLifecycleCli
     def read_exec_logs(
         self, session_id: str, exec_id: str, *, cursor: int | str | None = None, byte_budget: int, max_events: int
     ) -> dict[str, Any]:
-        """按预算读取一页 exec 日志，返回 dict。
+        """按预算读取一页日志，返回 events、next_cursor、exhausted、gap_detected。
 
-        返回结构::
-
-            {
-                "events": [{"cursor": str, "stream": str, "data": str, "bytes": int}, ...],
-                "next_cursor": str,   # 不透明游标；继续读取时原样回传
-                "exhausted": bool,    # True=流已自然读尽；False=预算耗尽，仍有尾部
-                "gap_detected": bool, # True=检测到游标不连续（保留/截断缺口）
-            }
-
-        预算语义：``byte_budget`` 按事件 data 的 UTF-8 字节数计，``max_events`` 按
-        事件条数计，任一耗尽即返回且 ``exhausted=False``；至少返回一个事件以保证
-        单条超预算时不空转。超预算的事件不消费、留待下页（next_cursor 不越过它）。
-
-        缺口语义：事件游标按执行内连续编号；与上一游标不连续即 ``gap_detected``
-        为 True（显式标记，不静默跳过），缺失事件不可补齐。
-
-        ``exhausted`` 只表达“日志流读尽”，与执行是否终态相互独立：看到 status
-        事件不代表尾部日志已读完，反之亦然（执行状态用 get_exec 表达）。
-
-        对仍在运行的执行，预算未耗尽且暂无新事件时会阻塞等待；需要流式消费或
-        自行控制等待时用 stream_exec_logs。
+        events 项包含 cursor、stream、data、bytes；next_cursor 是继续读取时原样回传的不透明游标。
+        byte_budget 计 data 的 UTF-8 字节数，max_events 计事件数；任一耗尽即返回 exhausted=False。
+        至少返回一个事件以免单条超预算时空转，其余超预算事件留待下页，next_cursor 不越过它。
+        gap_detected 显式标记执行内事件游标不连续，缺失事件不可补齐。
+        exhausted 只表示日志流读尽，与执行终态相互独立；执行状态由 get_exec 查询。
+        执行仍在运行且预算未耗尽时会等待新事件；流式消费或自行控制等待请用 stream_exec_logs。
         """
         if not isinstance(byte_budget, int) or isinstance(byte_budget, bool) or byte_budget < 1:
             raise ValueError("byte_budget must be a positive integer")

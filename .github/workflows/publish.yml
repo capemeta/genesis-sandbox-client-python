@@ -1,0 +1,70 @@
+name: Python SDK checks and publish
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.12.23"
+      - name: 安装锁定的开发依赖
+        run: uv sync --locked --python 3.12 --dev
+      - name: 核验版本标签
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          .venv/bin/python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          expected = f"v{version}"
+          actual = os.environ["GITHUB_REF_NAME"]
+          if actual != expected:
+              raise SystemExit(f"版本标签不一致：期望 {expected}，实际 {actual}")
+          PY
+      - name: 代码检查
+        run: .venv/bin/python -m ruff check .
+      - name: 类型检查
+        run: .venv/bin/python -m mypy src/genesis_sandbox_client
+      - name: 单元与离线协议测试
+        run: .venv/bin/python -m pytest -q
+      - name: 构建源码包及 wheel
+        run: uv build
+      - name: 分发元数据检查
+        run: uv tool run --from twine==6.2.0 twine check dist/*
+      - name: 独立安装与协议验证
+        run: |
+          uv pip install --python .venv/bin/python --target .release-check/installed --no-deps dist/*.whl
+          .venv/bin/python -I scripts/verify_release.py .release-check/installed dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/') && github.repository == 'capemeta/genesis-sandbox-client-python'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: 通过可信发布者上传 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -26,7 +26,7 @@ from .errors import APIError, ExecRecoveryError, ProtocolError, SandboxError, Tr
 from .session import SandboxSession, new_sandbox, quick_python, quick_run
 from .types import CancelReceipt, EffectiveEnvironment, ExecResult, SandboxOptions, SSEEvent
 
-__version__ = "0.3.0"
+__version__ = "0.1.0"
 
 __all__ = [
     # HTTP Client

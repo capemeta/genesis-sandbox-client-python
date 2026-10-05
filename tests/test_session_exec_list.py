@@ -18,6 +18,7 @@ class Response(io.BytesIO):
 class SessionExecListTests(unittest.TestCase):
     def test_sync_and_async_heartbeat_suspend_after_unknown_renewal(self):
         from genesis_sandbox_client import TransportError
+
         client = mock.Mock(spec=Client)
         client.renew_session.side_effect = TransportError("response lost")
         sync = SandboxSession(client, {"session_id": "original"}, SandboxOptions(heartbeat=False))
@@ -37,6 +38,7 @@ class SessionExecListTests(unittest.TestCase):
     @mock.patch("genesis_sandbox_client.client._urlopen")
     def test_all_mutation_verbs_are_single_send_after_connection_loss(self, urlopen):
         from genesis_sandbox_client import TransportError
+
         client = Client("https://sandbox.example", max_attempts=5, retry_base_delay=0)
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             with self.subTest(method=method):
@@ -52,7 +54,19 @@ class SessionExecListTests(unittest.TestCase):
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
     def test_paginated_read_preserves_server_fields_and_encodes_identity(self, urlopen):
-        payload = {"items": [{"exec_id": "original", "operation_id": "op", "session_id": "s/1", "status": "interrupted", "stop_confirmed": False}], "total": 1, "next_cursor": "next"}
+        payload = {
+            "items": [
+                {
+                    "exec_id": "original",
+                    "operation_id": "op",
+                    "session_id": "s/1",
+                    "status": "interrupted",
+                    "stop_confirmed": False,
+                }
+            ],
+            "total": 1,
+            "next_cursor": "next",
+        }
         urlopen.return_value = Response(json.dumps(payload).encode())
         result = Client("https://sandbox.example").list_session_execs("s/1", limit=3, cursor="a+/&b")
         request = urlopen.call_args.args[0]
@@ -83,14 +97,28 @@ class SessionExecListTests(unittest.TestCase):
         asynchronous = object.__new__(AsyncSandboxSession)
         asynchronous._client, asynchronous._session_id = client, "original"
         self.assertEqual(asyncio.run(asynchronous.list_execs()), payload)
-        self.assertEqual(client.list_session_execs.call_args_list,
-                         [mock.call("original", limit=7, cursor="next"), mock.call("original", limit=50, cursor=None)])
+        self.assertEqual(
+            client.list_session_execs.call_args_list,
+            [mock.call("original", limit=7, cursor="next"), mock.call("original", limit=50, cursor=None)],
+        )
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
     def test_invalid_or_foreign_history_and_stop_scalar_fail_closed(self, urlopen):
         from genesis_sandbox_client import ProtocolError
-        original = {"exec_id": "original", "operation_id": "op", "session_id": "session", "status": "interrupted", "stop_confirmed": False}
-        for page in ({"items": [], "total": True}, {"items": [dict(original, session_id="foreign")], "total": 1}, {"items": [dict(original, stop_confirmed="true")], "total": 1}, {"items": [original, original], "total": 2}):
+
+        original = {
+            "exec_id": "original",
+            "operation_id": "op",
+            "session_id": "session",
+            "status": "interrupted",
+            "stop_confirmed": False,
+        }
+        for page in (
+            {"items": [], "total": True},
+            {"items": [dict(original, session_id="foreign")], "total": 1},
+            {"items": [dict(original, stop_confirmed="true")], "total": 1},
+            {"items": [original, original], "total": 2},
+        ):
             urlopen.return_value = Response(json.dumps(page).encode())
             with self.assertRaises(ProtocolError):
                 Client("https://sandbox.example").list_session_execs("session")
@@ -98,7 +126,18 @@ class SessionExecListTests(unittest.TestCase):
     @mock.patch("genesis_sandbox_client.client._urlopen")
     def test_original_lookup_rejects_foreign_operation_without_creating(self, urlopen):
         from genesis_sandbox_client import ProtocolError
-        urlopen.return_value = Response(json.dumps({"exec_id": "original", "operation_id": "foreign", "session_id": "session", "status": "interrupted", "stop_confirmed": False}).encode())
+
+        urlopen.return_value = Response(
+            json.dumps(
+                {
+                    "exec_id": "original",
+                    "operation_id": "foreign",
+                    "session_id": "session",
+                    "status": "interrupted",
+                    "stop_confirmed": False,
+                }
+            ).encode()
+        )
         with self.assertRaises(ProtocolError):
             Client("https://sandbox.example").get_exec_by_operation("session", "original-op")
         self.assertEqual(urlopen.call_count, 1)

@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 发布验证的独立安装目录
+.release-check/
+.pypi-check/
+.wheel-check/

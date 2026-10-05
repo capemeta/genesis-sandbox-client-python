@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -26,8 +27,10 @@ def main() -> None:
     distribution = importlib.metadata.distribution("genesis-sandbox-client-python")
     if not Path(distribution.locate_file("")).resolve().is_relative_to(installed):
         raise AssertionError("SDK 发布元数据不是独立安装构件")
-    assert distribution.version == "0.3.0"
-    assert distribution.metadata["Requires-Python"] == ">=3.12"
+    metadata = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert distribution.version == metadata["project"]["version"]
+    assert genesis_sandbox_client.__version__ == distribution.version
+    assert distribution.metadata["Requires-Python"] == metadata["project"]["requires-python"]
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         assert {"genesis_sandbox_client/client.py", "genesis_sandbox_client/workspace_client.py",

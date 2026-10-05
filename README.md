@@ -2,18 +2,20 @@
 
 Genesis Sandbox 的官方 Python 客户端 SDK。**零第三方依赖**（仅标准库），提供同步与异步两套会话层、类型化错误分类、幂等恢复语义与预算受控的日志/文件读取。
 
-- 服务端协议与实现见 [genesis-sandbox](../genesis-sandbox) 仓库
-- 兄弟 SDK：[genesis-sandbox-client-go](https://github.com/capemeta/genesis-sandbox-client-go)、`genesis-sandbox-client-java`、`genesis-sandbox-client-node`
+- 服务端协议与实现见 [genesis-sandbox](https://github.com/capemeta/genesis-sandbox) 仓库
+- 兄弟 SDK：[genesis-sandbox-client-go](https://github.com/capemeta/genesis-sandbox-client-go)、[genesis-sandbox-client-java](https://github.com/capemeta/genesis-sandbox-client-java)、[genesis-sandbox-client-typescript](https://github.com/capemeta/genesis-sandbox-client-typescript)
 
 ## 安装
 
 要求 Python 3.12+。
 
 ```bash
-pip install genesis-sandbox-client-python
+pip install genesis-sandbox-client-python==0.1.0
 ```
 
-> 包尚未发布到 PyPI：发布前请从源码安装，例如
+首次公开发布版本为 `0.1.0`，不沿用单仓时期的内部版本编号。发布与 Platform 接入步骤见 [发布指南](https://github.com/capemeta/genesis-sandbox-client-python/blob/main/docs/publishing.md)。
+
+> 首次发布完成前请从源码安装，例如
 > `uv pip install git+https://github.com/capemeta/genesis-sandbox-client-python.git`，
 > 或本地 `uv pip install -e /path/to/genesis-sandbox-client-python`。
 
@@ -153,7 +155,7 @@ build = client.build_dependencies(
 
 从 Catalog 选择 Card 时，用 `resolve_environment(profile=card["name"], profile_revision=card["profile_revision"])` 精确绑定后再构建。
 
-## 从旧版迁移（0.2.x → 0.3.0）
+## 从单仓开发版本迁移
 
 SDK 已从 `genesis-sandbox` 仓库迁至本仓库，导入名从 `sandbox` 改为 `genesis_sandbox_client`：
 
@@ -165,7 +167,7 @@ from sandbox import Client, new_sandbox
 from genesis_sandbox_client import Client, new_sandbox
 ```
 
-公开 API（类、函数、异常、语义）保持不变。
+单仓时期的 `0.1.x`、`0.2.x`、`0.3.x` 为内部开发编号；独立 Python 包从 `0.1.0` 开始公开发布。版本号独立于 Sandbox 服务和其他语言 SDK。
 
 ## License
 

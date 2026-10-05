@@ -1,22 +1,31 @@
-# Changelog
-
-All notable changes to this project will be documented in this file.
+# 更新记录
 
 ## Unreleased
 
-### Added
+暂无待发布变更。
 
-- `Client.get_runtime_control_capabilities` 单次、有界只读查询服务实际运行前提；
-  不创建实例、不启动执行，也不将控制可达或 Docker 配置事实视为隔离验收。
+## 0.1.0（首次公开发布候选）
 
-- `Client.list_session_execs`（GET /v1/sessions/{id}/execs）：分页列出会话执行记录，
-  limit 严格校验 1..100（bool/越界/浮点直接 ValueError，不发请求），cursor 为不透明
-  游标；session_id 作为路径段整体编码。`SandboxSession.list_execs` / `AsyncSandboxSession.list_execs`
-  提供会话内便捷包装（默认 limit=50）。
+### 首次交付
 
-## v0.3.0 - 2026-10-01
+- 独立 Python 3.12+ SDK，运行时仅依赖标准库，分发包名为 `genesis-sandbox-client-python`，导入名为 `genesis_sandbox_client`。
+- 同步/异步会话、Job、执行回执恢复、取消停止确认、心跳、预算受控的日志读取与 WorkspaceFS。
+- 工作区生命周期、共享存储绑定、执行治理、输出目录及运行控制能力查询。
+- `Client.list_session_execs` 与同步/异步会话 `list_execs` 提供只读分页查询。
+- 写请求仅发送一次；未知结果按原身份查询，禁止自动重放未知副作用。
+- GitHub Actions 标签发布、PyPI Trusted Publishing，以及独立 wheel 安装与协议校验。
 
-### Changed
+### 版本说明
+
+本版本汇总单仓阶段和独立仓开发阶段的能力，是独立 Python 分发包的首次公开发布候选。此前记录中的 `0.1.x`、`0.2.x`、`0.3.x` 属于内部开发编号，不表示已经发布到 PyPI。版本号无需与服务端或其他语言 SDK 一致。
+
+## 内部开发历史（不属于 PyPI 公开版本）
+
+保留迁移与行为调整记录，以下编号不是本分发包的公开发布序列。
+
+### 内部开发 0.3.0 - 2026-10-01
+
+#### Changed
 
 - Added read-only `Client.list_session_execs` and sync/async session `list_execs` pagination.
 - Mutations are sent once even with an idempotency key; unknown outcomes must be resolved by querying the original identity.
@@ -38,18 +47,18 @@ All notable changes to this project will be documented in this file.
   cadence.
 - `_types` module renamed to public `types`.
 
-### Removed
+#### Removed
 
 - `conftest.py` sys.path hack and example sys.path bootstrap (replaced by the
   src layout with an editable install).
 
-## v0.2.0
+### 内部开发 0.2.0
 
 History from the monorepo era (`genesis-sandbox/sdks/python`): session lookup
 recovery, cancel receipts (stop-confirmed gating), budgeted log pagination,
 credential rotation via `token_provider`, and endpoint security constraints.
 
-## v0.1.0
+### 单仓初始开发 0.1.0
 
 Initial monorepo SDK: sync/async session helpers with heartbeat, quick job
 helpers, typed errors with `classify_error`, SSE log streaming.
