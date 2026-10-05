@@ -13,8 +13,14 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from .errors import APIError, ProtocolError, TransportError
+from .control_probe import RuntimeControlClientMixin
+from .execution_governance import trusted_governance as validate_trusted_governance
+from .invocation_output import output_request
+from .json_codec import loads as decode_response_json
+from .session_exec_client import SessionExecClientMixin, validate_exec_record
 from .types import SSEEvent
 from .workspace_client import WorkspaceClientMixin
+from .workspace_lifecycle import WorkspaceLifecycleClientMixin
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -119,7 +125,7 @@ def _validate_resolution(environment: dict[str, Any] | None, resolution_id: str 
         raise ValueError("resolution_id and environment selector are mutually exclusive")
 
 
-class Client(WorkspaceClientMixin):
+class Client(WorkspaceClientMixin, SessionExecClientMixin, WorkspaceLifecycleClientMixin, RuntimeControlClientMixin):
     def __init__(
         self,
         base_url: str,
@@ -166,26 +172,12 @@ class Client(WorkspaceClientMixin):
         body: dict[str, Any] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-        retry_safe: bool = False,
+        deadline_seconds: float | None = None,
     ) -> Any:
-        # 写操作重试纪律：仅当请求自带原生幂等身份（idempotency_key / operation_id）
-        # 或调用方显式 retry_safe 时才有限重试；重放复用同一 payload，不会生成新
-        # operation_id。无身份的写请求即使传入 max_retries 也只发一次。
-        has_idempotency_key = isinstance(body, dict) and bool(body.get("idempotency_key") or body.get("operation_id"))
-        if max_retries is None:
-            max_attempts = (
-                self.max_attempts
-                if (self._is_idempotent(method) or (method.upper() == "POST" and has_idempotency_key) or retry_safe)
-                else 1
-            )
-        else:
+        # 幂等身份用于查询原结果，不证明未知写操作可以自动重放。
+        max_attempts = self._attempts_for(method)
+        if max_retries is not None and self._is_idempotent(method):
             max_attempts = max(1, int(max_retries))
-        if (
-            not self._is_idempotent(method)
-            and not (method.upper() == "POST" and has_idempotency_key)
-            and not retry_safe
-        ):
-            max_attempts = 1
         delay_seconds = self.retry_base_delay
         last_err: BaseException | None = None
 
@@ -207,7 +199,12 @@ class Client(WorkspaceClientMixin):
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
             try:
-                with _urlopen(req, timeout=self.timeout if timeout is None else timeout) as response:
+                if deadline_seconds is None:
+                    opened = _urlopen(req, timeout=self.timeout if timeout is None else timeout)
+                else:
+                    from .deadline_http import deadline_urlopen
+                    opened = deadline_urlopen(req, deadline_seconds)
+                with opened as response:
                     if response.status == 204:
                         return None
                     raw = response.read((16 << 20) + 1)
@@ -217,13 +214,11 @@ class Client(WorkspaceClientMixin):
                     if not res_body:
                         return None
                     try:
-                        return json.loads(res_body)
+                        return decode_response_json(res_body)
                     except ValueError as exc:
                         raise ProtocolError(f"sandbox response is not valid JSON: {exc}") from exc
             except urllib.error.HTTPError as exc:
                 last_err = exc
-                if method.upper() == "DELETE" and exc.code == 404:
-                    return None
                 if self._is_transient(exc.code) and attempt < max_attempts - 1:
                     time.sleep(self._retry_after(exc, delay_seconds))
                     delay_seconds *= 2
@@ -296,7 +291,7 @@ class Client(WorkspaceClientMixin):
 
     @staticmethod
     def _is_idempotent(method: str) -> bool:
-        return method.upper() in {"GET", "HEAD", "OPTIONS", "PUT", "DELETE"}
+        return method.upper() in {"GET", "HEAD", "OPTIONS"}
 
     @staticmethod
     def _is_transient(status: int) -> bool:
@@ -316,7 +311,7 @@ class Client(WorkspaceClientMixin):
     def _api_error(exc: urllib.error.HTTPError) -> APIError:
         try:
             raw = exc.read(65536).decode("utf-8", errors="replace")
-            payload = json.loads(raw)
+            payload = decode_response_json(raw)
         except Exception:
             payload = {}
             raw = str(exc.reason)
@@ -459,7 +454,7 @@ class Client(WorkspaceClientMixin):
             content = content.encode("utf-8")
         path = f"/v1/jobs/{urllib.parse.quote(job_id)}/files?name={urllib.parse.quote(name)}"
         with self._raw_request("POST", path, data=content, content_type="application/octet-stream") as response:
-            return json.loads(response.read().decode("utf-8"))
+            return decode_response_json(response.read().decode("utf-8"))
 
     def download_artifact(self, artifact_id: str) -> bytes:
         path = f"/v1/artifacts/{urllib.parse.quote(artifact_id)}"
@@ -542,18 +537,21 @@ class Client(WorkspaceClientMixin):
 
         ``GET /v1/sessions:lookup?idempotency_key=...``：命中返回 Session dict；
         404 返回 None（与 get_exec_by_operation 的 APIError 风格不同——lookup 的
-        404 是正常的“未找到”结果，调用方据此决定是否在去重窗口内原样重提）。
+        404 是“未找到”结果，不是未创建过的证明）。
         其余错误仍抛 APIError / TransportError。
 
         注意：服务端 404 无法区分“从未创建”与“去重/回执保留期已过”，无法证明
-        未执行过；是否可原样重提须遵守 Provider 的去重保留窗口（契约 §8）。
+        未执行过；必须核对原身份及保留窗口，不得据此自动重新提交。
         """
-        if not idempotency_key or not str(idempotency_key).strip():
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key.encode("utf-8")) > 128 or any(ord(char) < 32 for char in idempotency_key):
             raise ValueError("idempotency_key is required")
         try:
-            return self._request(
+            result = self._request(
                 "GET", f"/v1/sessions:lookup?idempotency_key={urllib.parse.quote(str(idempotency_key))}"
             )
+            if not isinstance(result, dict) or not result.get("session_id") or result.get("idempotency_key") != idempotency_key:
+                raise ProtocolError("session lookup original identity mismatch")
+            return result
         except APIError as exc:
             if exc.status_code == 404:
                 return None
@@ -567,7 +565,7 @@ class Client(WorkspaceClientMixin):
 
     def resume_session(self, session_id: str) -> dict[str, Any]:
         # 服务端按 Session 锁串行恢复，重复请求复用已激活的 runtime。
-        return self._request("POST", f"/v1/sessions/{urllib.parse.quote(session_id)}:resume", retry_safe=True)
+        return self._request("POST", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}:resume")
 
     def renew_session(
         self, session_id: str, extend_seconds: int, timeout: float | None = None, max_retries: int = 1
@@ -594,6 +592,7 @@ class Client(WorkspaceClientMixin):
         timeout: float | None = None,
         operation_id: str | None = None,
         subprocess_policy: str | None = None,
+        output_directory: str | None = None,
     ) -> dict[str, Any]:
         """同步执行（阻塞至回执）。
 
@@ -604,7 +603,7 @@ class Client(WorkspaceClientMixin):
         """
         if bool(code) == bool(command):
             raise ValueError("exactly one of code or command is required")
-        payload: dict[str, Any] = {"operation_id": operation_id or uuid.uuid4().hex}
+        payload: dict[str, Any] = {"operation_id": operation_id or uuid.uuid4().hex, **output_request(output_directory)}
         if subprocess_policy:
             if subprocess_policy not in {"allow", "deny"}:
                 raise ValueError("invalid subprocess_policy")
@@ -640,6 +639,8 @@ class Client(WorkspaceClientMixin):
         callback_url: str | None = None,
         operation_id: str | None = None,
         subprocess_policy: str | None = None,
+        output_directory: str | None = None,
+        trusted_governance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """异步执行提交，返回含 exec_id 的回执。
 
@@ -649,7 +650,7 @@ class Client(WorkspaceClientMixin):
         """
         if bool(code) == bool(command):
             raise ValueError("exactly one of code or command is required")
-        payload: dict[str, Any] = {"operation_id": operation_id or uuid.uuid4().hex}
+        payload: dict[str, Any] = {"operation_id": operation_id or uuid.uuid4().hex, **output_request(output_directory)}
         if subprocess_policy:
             if subprocess_policy not in {"allow", "deny"}:
                 raise ValueError("invalid subprocess_policy")
@@ -668,18 +669,24 @@ class Client(WorkspaceClientMixin):
             payload["timeout_seconds"] = int(timeout_seconds)
         if callback_url:
             payload["callback_url"] = callback_url
+        if trusted_governance is not None:
+            if not operation_id:
+                raise ValueError("trusted governance requires a persisted original operation_id")
+            payload["trusted_governance"] = validate_trusted_governance(trusted_governance)
         return self._request("POST", f"/v1/sessions/{urllib.parse.quote(session_id)}/exec:async", payload)
 
     def get_exec(self, session_id: str, exec_id: str) -> dict[str, Any]:
-        return self._request(
-            "GET", f"/v1/sessions/{urllib.parse.quote(session_id)}/execs/{urllib.parse.quote(exec_id)}"
+        result = self._request(
+            "GET", f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs/{urllib.parse.quote(exec_id, safe='')}"
         )
+        return validate_exec_record(result, session_id, execution=exec_id)
 
     def get_exec_by_operation(self, session_id: str, operation_id: str) -> dict[str, Any]:
-        return self._request(
+        result = self._request(
             "GET",
-            f"/v1/sessions/{urllib.parse.quote(session_id)}/execs:lookup?operation_id={urllib.parse.quote(operation_id)}",
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs:lookup?operation_id={urllib.parse.quote(operation_id, safe='')}",
         )
+        return validate_exec_record(result, session_id, operation=operation_id)
 
     def cancel_exec(
         self, session_id: str, exec_id: str, timeout: float | None = None, max_retries: int = 1
@@ -697,12 +704,13 @@ class Client(WorkspaceClientMixin):
         CancelReceipt.from_record；停止未知会以 ExecRecoveryError(phase="cancel")
         抛出。取消不做盲重试（max_retries 默认 1）。
         """
-        return self._request(
+        result = self._request(
             "POST",
-            f"/v1/sessions/{urllib.parse.quote(session_id)}/execs/{urllib.parse.quote(exec_id)}:cancel",
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/execs/{urllib.parse.quote(exec_id, safe='')}:cancel",
             timeout=timeout,
             max_retries=max_retries,
         )
+        return validate_exec_record(result, session_id, execution=exec_id)
 
     def stream_exec_logs(self, session_id: str, exec_id: str, cursor: int | str = 0) -> Iterator[SSEEvent]:
         """SSE 惰性生成器，逐条产出 SSEEvent。
@@ -872,7 +880,7 @@ class Client(WorkspaceClientMixin):
             content_type="application/octet-stream",
             extra_headers=extra_headers or None,
         ) as response:
-            return json.loads(response.read().decode("utf-8"))
+            return decode_response_json(response.read().decode("utf-8"))
 
     def download_session_file(self, session_id: str, path: str, *, max_bytes: int = 2 * 1024 * 1024) -> bytes:
         """在读取源头限制文件预算；超限拒绝，不返回不完整的成功内容。"""
@@ -896,14 +904,6 @@ class Client(WorkspaceClientMixin):
         query = urllib.parse.urlencode(params)
         return self._request("GET", f"/v1/sessions/{urllib.parse.quote(session_id)}/files:list?{query}")
 
-    def stat_session_file(self, session_id: str, path: str) -> dict[str, Any]:
-        target = f"/v1/sessions/{urllib.parse.quote(session_id)}/files:stat?path={urllib.parse.quote(path, safe='')}"
-        return self._request("GET", target)
-
-    def mkdir_session_dir(self, session_id: str, path: str) -> dict[str, Any]:
-        target = f"/v1/sessions/{urllib.parse.quote(session_id)}/dirs?path={urllib.parse.quote(path, safe='')}"
-        return self._request("POST", target)
-
     def remove_session_file(
         self, session_id: str, path: str, recursive: bool = False, if_match: str | None = None
     ) -> dict[str, Any] | None:
@@ -916,7 +916,7 @@ class Client(WorkspaceClientMixin):
             data = response.read(16385)
         if len(data) > 16384:
             raise ProtocolError("delete receipt exceeds byte budget")
-        return json.loads(data) if data else None
+        return decode_response_json(data) if data else None
 
     def build_dependencies(
         self,

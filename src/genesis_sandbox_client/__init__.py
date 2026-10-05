@@ -21,6 +21,7 @@ Quick one-shot job (no session)::
 
 from .async_session import AsyncSandboxSession, new_sandbox_async, open_sandbox_async
 from .client import Client
+from .control_probe import RuntimeControlCapabilities
 from .errors import APIError, ExecRecoveryError, ProtocolError, SandboxError, TransportError, classify_error
 from .session import SandboxSession, new_sandbox, quick_python, quick_run
 from .types import CancelReceipt, EffectiveEnvironment, ExecResult, SandboxOptions, SSEEvent
@@ -30,6 +31,7 @@ __version__ = "0.3.0"
 __all__ = [
     # HTTP Client
     "Client",
+    "RuntimeControlCapabilities",
     "SandboxError",
     "APIError",
     "TransportError",

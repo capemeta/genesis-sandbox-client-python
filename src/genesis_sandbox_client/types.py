@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import ProtocolError
+
 SESSION_TTL: int = 300
 JOB_TIMEOUT: int = 60
 
@@ -81,7 +83,9 @@ class ExecResult:
     effective_environment: EffectiveEnvironment | None = None
 
     def ok(self) -> bool:
-        return self.exit_code == 0
+        # 与 Go SDK 对齐：取消/超时等异常终止会置 error_code（如 EXEC_CANCELLED），
+        # 即使 exit_code 为 0 也不是成功执行。
+        return self.exit_code == 0 and not self.error_code
 
     def __repr__(self) -> str:
         preview = self.stdout[:60].replace("\n", "\\n")
@@ -127,8 +131,16 @@ class CancelReceipt:
     @classmethod
     def from_record(cls, exec_id: str, record: dict[str, Any] | None) -> CancelReceipt:
         """Map a :cancel ExecRecord response onto the cancel outcome taxonomy."""
+        if not isinstance(record, dict) or record.get("exec_id") != exec_id:
+            raise ProtocolError("cancel receipt original execution identity mismatch")
+        if "stop_confirmed" in record and not isinstance(record["stop_confirmed"], bool):
+            raise ProtocolError("cancel receipt physical stop evidence must be boolean")
         status = str((record or {}).get("status") or "")
         stopped = (record or {}).get("stop_confirmed") is True
+        if status not in {"queued", "running", "succeeded", "failed", "cancelled", "timed_out", "interrupted"}:
+            raise ProtocolError("cancel receipt status is invalid")
+        if stopped and status in {"queued", "running"}:
+            raise ProtocolError("nonterminal execution cannot confirm physical stop")
         if status in ("cancelled", "timed_out"):
             return cls(exec_id, "stop_confirmed" if stopped else "stop_unknown", status, stopped, record)
         if status in ("succeeded", "failed"):

@@ -79,17 +79,16 @@ class ClientContractTest(unittest.TestCase):
         self.assertTrue(caught.exception.retryable)
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
-    def test_resume_post_retries_because_runtime_resume_is_idempotent(self, urlopen):
+    def test_resume_unknown_does_not_replay_runtime_creation(self, urlopen):
         urlopen.side_effect = [
             _http_error(),
             _Response(200, {"session_id": "session-1", "status": "active", "active_sandbox_id": "sandbox-1"}),
         ]
         client = Client("http://127.0.0.1:18010", max_attempts=2, retry_base_delay=0)
 
-        result = client.resume_session("session-1")
-
-        self.assertEqual(result["active_sandbox_id"], "sandbox-1")
-        self.assertEqual(urlopen.call_count, 2)
+        with self.assertRaises(APIError):
+            client.resume_session("session-1")
+        self.assertEqual(urlopen.call_count, 1)
         self.assertEqual(
             urllib.parse.urlparse(urlopen.call_args.args[0].full_url).path,
             "/v1/sessions/session-1:resume",
@@ -127,15 +126,15 @@ class ClientContractTest(unittest.TestCase):
         self.assertEqual(result["exec_id"], "exec-1")
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
-    def test_post_with_idempotency_key_can_retry(self, urlopen):
+    def test_post_with_idempotency_key_does_not_replay_unknown_submission(self, urlopen):
         urlopen.side_effect = [
             _http_error(),
             _Response(200, {"job_id": "job-1", "status": "queued"}),
         ]
         client = Client("http://127.0.0.1:18010", max_attempts=3, retry_base_delay=0)
-        result = client.submit_job(code="print(1)", idempotency_key="request-1")
-        self.assertEqual(result["job_id"], "job-1")
-        self.assertEqual(urlopen.call_count, 2)
+        with self.assertRaises(APIError):
+            client.submit_job(code="print(1)", idempotency_key="request-1")
+        self.assertEqual(urlopen.call_count, 1)
 
     def test_wait_job_is_bounded(self):
         client = Client("http://127.0.0.1:18010")
@@ -244,11 +243,13 @@ class ClientContractTest(unittest.TestCase):
         urlopen.assert_not_called()
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
-    def test_exec_operation_id_is_stable_for_retries(self, urlopen):
+    def test_exec_unknown_keeps_operation_id_without_replaying(self, urlopen):
         urlopen.side_effect = [OSError("connection reset"), _Response(200, {"exec_id": "exec-1"})]
         client = Client("http://127.0.0.1:18010", retry_base_delay=0)
-        client.exec_session_async("sess-1", code="print(1)", operation_id="op-1")
-        self.assertEqual(urlopen.call_count, 2)
+        from genesis_sandbox_client import TransportError
+        with self.assertRaises(TransportError):
+            client.exec_session_async("sess-1", code="print(1)", operation_id="op-1")
+        self.assertEqual(urlopen.call_count, 1)
         for call in urlopen.call_args_list:
             self.assertEqual(json.loads(call.args[0].data)["operation_id"], "op-1")
 
@@ -258,7 +259,7 @@ class SessionLookupTests(unittest.TestCase):
 
     @mock.patch("genesis_sandbox_client.client._urlopen")
     def test_lookup_session_hit(self, urlopen):
-        urlopen.return_value = _Response(200, {"session_id": "session-1", "status": "active"})
+        urlopen.return_value = _Response(200, {"session_id": "session-1", "idempotency_key": "request-1", "status": "active"})
         result = Client("http://127.0.0.1:18010").lookup_session("request-1")
         request = urlopen.call_args.args[0]
         parsed = urllib.parse.urlparse(request.full_url)
@@ -453,3 +454,43 @@ class RawRequestTransientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListSessionExecsContractTest(unittest.TestCase):
+    @mock.patch("genesis_sandbox_client.client._urlopen")
+    def test_list_session_execs_builds_query_and_parses_list(self, urlopen):
+        urlopen.return_value = _Response(
+            200,
+            {
+                "items": [
+                    {"exec_id": "exec-1", "operation_id": "op-1", "session_id": "sess-1", "status": "succeeded"},
+                    {"exec_id": "exec-2", "operation_id": "op-2", "session_id": "sess-1", "status": "running"},
+                ],
+                "total": 2,
+                "next_cursor": "cur-2",
+            },
+        )
+        client = Client("http://127.0.0.1:18010")
+
+        result = client.list_session_execs("sess-1", limit=50, cursor="cur-1")
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:18010/v1/sessions/sess-1/execs?limit=50&cursor=cur-1",
+        )
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(result["next_cursor"], "cur-2")
+
+    @mock.patch("genesis_sandbox_client.client._urlopen")
+    def test_list_session_execs_omits_empty_params(self, urlopen):
+        urlopen.return_value = _Response(200, {"items": [], "total": 0, "next_cursor": ""})
+        client = Client("http://127.0.0.1:18010")
+
+        client.list_session_execs("sess with space")
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:18010/v1/sessions/sess%20with%20space/execs",
+        )

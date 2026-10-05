@@ -111,11 +111,15 @@ except ExecRecoveryError as e:  # 结果未知，按身份恢复
 
 ### 写重试与 operation_id
 
-写操作仅在携带原生幂等身份（`idempotency_key` / `operation_id`）或显式 `retry_safe` 时有限重试；重放复用同一 payload，绝不生成新 `operation_id`。无身份的写请求只发一次（即使传入 `max_retries`）。
+全部写操作只发送一次，即使携带原生幂等身份或传入 `max_retries`。幂等身份用于查询原结果，不作为未知副作用自动重放的许可；仅 GET/HEAD/OPTIONS 可以有界重试。
+
+同步/异步自动心跳在续租异常后暂停，可通过 `heartbeat_error` 查看原异常；先查询原会话期限和状态，不自动续写、重建计算或切换环境。
 
 `exec_named_session` / `exec_session_async` 未显式传 `operation_id` 时本地生成 uuid4——进程在拿到回执前崩溃则该身份丢失。**生产必须显式传入并持久保存 operation_id**，响应丢失时用 `get_exec_by_operation` / `wait_exec_by_operation` 按同一身份查回执。
 
 ### 恢复（ExecRecoveryError）
+
+`client.list_session_execs(session_id, limit=50, cursor=None)` 与同步/异步会话 `list_execs` 只读分页查询原执行，返回服务端的 `items`、`total` 和可选 `next_cursor`，不会创建或恢复运行环境。
 
 提交或观察发生不确定的网络错误时抛 `ExecRecoveryError`，携带 `session_id`、`operation_id`、可选 `exec_id` 与 `phase`（`submit` / `observe` / `lookup` / `cancel`）。会话创建响应丢失用 `client.lookup_session(idempotency_key)`（404 返回 None）。
 

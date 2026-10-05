@@ -66,6 +66,7 @@ class AsyncSandboxSession:
         self._heartbeat_enabled = options.heartbeat and self._renew_interval > 0 and self._renew_extend > 0
         self._renew_stop = asyncio.Event()
         self._renew_task: asyncio.Task[None] | None = None
+        self._heartbeat_error: Exception | None = None
 
     def _start_heartbeat(self) -> None:
         if self._heartbeat_enabled and self._renew_task is None:
@@ -93,9 +94,17 @@ class AsyncSandboxSession:
                         res.get("expires_at") if res else None,
                     )
                 except Exception as e:  # noqa: BLE001
-                    log.warning("Renew failed (will retry): session=%s err=%s", self._session_id, e)
+                    self._heartbeat_error = e
+                    self._renew_stop.set()
+                    log.warning("Heartbeat suspended; inspect original session before renewing: session=%s",
+                        self._session_id)
+                    return
         except asyncio.CancelledError:
             return
+
+    @property
+    def heartbeat_error(self) -> Exception | None:
+        return self._heartbeat_error
 
     @property
     def session_id(self) -> str:
@@ -222,6 +231,9 @@ class AsyncSandboxSession:
             )
         self._operation_by_exec_id[exec_id] = operation_id
         return exec_id
+
+    async def list_execs(self, *, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self._client.list_session_execs, self._session_id, limit=limit, cursor=cursor)
 
     async def get_exec_by_operation(self, operation_id: str) -> dict[str, Any]:
         """Look up an ExecRecord using the stable identity returned in recovery errors."""

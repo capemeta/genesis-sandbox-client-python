@@ -1,6 +1,6 @@
 [project]
 name = "genesis-sandbox-client-python"
-version = "0.3.0"
+version = "0.1.0"
 description = "Dependency-free Python client SDK for Genesis Sandbox (sessions, jobs, WorkspaceFS, artifacts)"
 readme = "README.md"
 authors = [
